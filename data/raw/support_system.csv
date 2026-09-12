@@ -1,0 +1,11 @@
+ticket_id,customer_id,status,priority,ticket_date
+T001,C001,Resolved,High,2026-09-14
+T002,C002,Resolved,Medium,2026-09-13
+T003,C003,Open,High,2026-09-12
+T004,C004,Resolved,Medium,2026-09-11
+T005,C005,Resolved,High,2026-09-10
+T006,C006,Open,Medium,2026-09-09
+T007,C007,Resolved,High,2026-09-08
+T008,C008,Resolved,Medium,2026-09-07
+T009,C009,Open,High,2026-09-06
+T010,C010,Resolved,Medium,2026-09-05
