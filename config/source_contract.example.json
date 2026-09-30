@@ -1,0 +1,26 @@
+{
+  "name": "erp_orders",
+  "type": "File upload",
+  "format": "csv",
+  "required_columns": ["order_id", "customer_id", "amount", "updated_at"],
+  "unique_key": "order_id",
+  "freshness_column": "updated_at",
+  "freshness_sla_hours": 24,
+  "pass_threshold": 95,
+  "reject_unexpected_columns": false,
+  "expected_schema": {
+    "order_id": "string",
+    "customer_id": "string",
+    "amount": "double",
+    "updated_at": "timestamp"
+  },
+  "numeric_rules": [
+    {"column": "amount", "min": 0}
+  ],
+  "regex_rules": [],
+  "reference": {
+    "source": "customer_master",
+    "column": "customer_id",
+    "reference_column": "customer_id"
+  }
+}
