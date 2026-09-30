@@ -1,17 +1,43 @@
 from __future__ import annotations
-import json,subprocess,sys,uuid
+import json,sys,uuid
 from pathlib import Path
 import streamlit as st
 from src.source_adapters import materialize_source
+from src.reliability_pipeline import run as run_pipeline
 BASE=Path(__file__).resolve().parent; INCOMING=BASE/"data"/"incoming"; OUTPUT=BASE/"output"
 st.set_page_config(page_title="Enterprise Data Reliability",page_icon="◆",layout="wide")
 st.markdown("""<style>
-.block-container{max-width:1280px;padding:2rem 2.5rem 4rem}.hero{padding:34px 40px;border-radius:22px;background:linear-gradient(135deg,#0b1f33,#164b63);color:#fff;margin-bottom:22px}.hero h1{font-size:2.55rem;margin:.3rem 0 .5rem}.hero p{font-size:1.05rem;max-width:1000px;line-height:1.6;color:#d8e6ee}.card{border:1px solid #dce5eb;border-radius:16px;padding:18px 20px;background:#fff;margin:8px 0}.small{color:#607080;font-size:.9rem}
+.block-container{max-width:1280px;padding:2rem 2.5rem 4rem}.hero{padding:34px 40px;border-radius:22px;background:linear-gradient(135deg,#0b1f33,#164b63);color:#fff;margin-bottom:22px}.hero h1{font-size:2.55rem;margin:.3rem 0 .5rem}.hero p{font-size:1.05rem;max-width:1000px;line-height:1.6;color:#d8e6ee}.card{border:1px solid #dce5eb;border-radius:16px;padding:18px 20px;background:#fff;margin:8px 0}.small{color:#607080;font-size:.9rem}.pipeline{display:flex;align-items:stretch;overflow-x:auto;padding:18px 4px 22px}.stage{min-width:112px;border:1px solid #d8e0e7;border-radius:14px;padding:12px 10px;text-align:center;background:#f7f9fb}.stage .num{font-size:10px;color:#738291;font-weight:700}.stage .title{font-weight:700;font-size:13px;margin-top:4px}.stage .state{font-size:11px;margin-top:6px}.stage.running{border:2px solid #1677ff;background:#eef6ff}.stage.done{border-color:#26a269;background:#effaf4}.stage.done .state{color:#16824f}.stage.warn{border-color:#d99b24;background:#fff9e8}.stage.error{border:2px solid #e5484d;background:#fff1f1}.detail{border-left:4px solid #1677ff;background:#f6f9fc;padding:12px 16px;border-radius:8px;margin:8px 0}
 </style>""",unsafe_allow_html=True)
 if "sources" not in st.session_state:st.session_state.sources=[]
 if "last_result" not in st.session_state:st.session_state.last_result=None
+if "live_state" not in st.session_state:st.session_state.live_state={}
 st.markdown("""<div class="hero"><div style="font-size:.8rem;letter-spacing:.15em;color:#a9c3d0">DATA ENGINEERING • PRODUCTION-STYLE REFERENCE IMPLEMENTATION</div><h1>Enterprise Data Reliability & Readiness Platform</h1><p>Connect a source. Preserve the raw batch. Profile it. Enforce configurable quality controls. Quarantine failures. Produce trusted Silver/Gold data. Record an auditable reliability score. The reliability engine is independent of the source type.</p></div>""",unsafe_allow_html=True)
 a,b,c,d=st.columns(4); a.metric("Source adapters","6"); b.metric("Formats","4"); c.metric("Quality dimensions","5"); d.metric("Pipeline controls","10")
+STAGES=[("01","Ingest"),("02","Bronze"),("03","Profile"),("04","Schema"),("05","Quality"),("06","Quarantine"),("07","Silver"),("08","Integrity"),("09","Gold"),("10","Audit")]
+
+def render_graph(state=None,row=None):
+    state=state or {}
+    html="<div class=\"pipeline\">"
+    for i,(num,title) in enumerate(STAGES):
+        cls=""; label="Waiting"
+        if row:
+            if title in ("Ingest","Bronze","Profile","Silver","Audit"):
+                cls="done"
+                label={"Ingest":"Complete","Bronze":"Preserved","Profile":f"{row.get('rows_received',0):,} rows","Silver":f"{row.get('rows_valid',0):,} valid","Audit":f"{row.get('reliability_score_pct',0)}%"}[title]
+            elif title=="Schema": cls="error" if row.get("schema_errors") else "done"; label="Failed" if cls=="error" else "Passed"
+            elif title=="Quality": cls="warn" if row.get("rows_quarantined",0)>0 else "done"; label=f"{row.get('quality_rules',{}).get('rule_count',0)} rules"
+            elif title=="Quarantine": cls="warn" if row.get("rows_quarantined",0)>0 else "done"; label=f"{row.get('rows_quarantined',0):,} rejected"
+            elif title=="Integrity": cls="warn" if row.get("metrics",{}).get("referential_integrity",100)<100 else "done"; label=f"{row.get('metrics',{}).get('referential_integrity',0)}%"
+            elif title=="Gold": cls="done" if row.get("status")=="PASS" else "error"; label="Released" if cls=="done" else "Blocked"
+        else:
+            if i==state.get("error",-1): cls="error"; label="Failed"
+            elif i==state.get("stage",-1): cls="running"; label="Running"
+            elif i<=state.get("done",-1): cls="done"; label="Complete"
+        html+=f'<div class="stage {cls}"><div class="num">{num}</div><div class="title">{title}</div><div class="state">{label}</div></div>'
+        if i<len(STAGES)-1: html+="<div style=\"min-width:18px\"></div>"
+    return html+"</div>"
+
 st.divider(); st.markdown("## 1 · Register a source"); st.caption("CSV, Excel, JSON, JSONL and Parquet uploads are accepted. API, cloud and database sources use the same downstream reliability engine.")
 with st.form("source"):
     c1,c2=st.columns(2); name=c1.text_input("Source name",placeholder="erp_orders"); kind=c2.selectbox("Source type",["File upload","API / HTTP","Amazon S3","Azure Blob / ADLS","Database","Local path"])
