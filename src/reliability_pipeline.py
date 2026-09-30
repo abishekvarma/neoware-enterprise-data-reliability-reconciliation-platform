@@ -152,9 +152,12 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False,
             failed_out=failed.drop("_dup_count","_ref_value","_quality_failed")
             valid_out=valid.drop("_dup_count","_ref_value","_quality_failed","_failure_reason")
             failed_out.write.mode("overwrite").parquet(str(base/"quarantine"/spec["name"]/batch))
-            valid_out.write.mode("overwrite").parquet(str(base/"silver"/spec["name"]/batch))
             _event(on_event,"stage_start",6,"Silver",spec["name"],"Writing trusted records")
-            _event(on_event,"stage_done",6,"Silver",spec["name"],f"{valid_count:,} valid records promoted")
+            if schema_errors:
+                _event(on_event,"stage_error",6,"Silver",spec["name"],"Silver promotion blocked because the schema contract failed")
+            else:
+                valid_out.write.mode("overwrite").parquet(str(base/"silver"/spec["name"]/batch))
+                _event(on_event,"stage_done",6,"Silver",spec["name"],f"{valid_count:,} valid records promoted")
             _event(on_event,"stage_start",7,"Integrity",spec["name"],"Evaluating relationships")
             required=[c for c in spec.get("required_columns",[]) if c in df.columns]
             if required:
