@@ -1,9 +1,0 @@
-{
-  "raw_records": 41,
-  "trusted_orders": 8,
-  "reconciliation_records": 10,
-  "reconciliation_match_rate_pct": 80.0,
-  "quality_score_pct": 90.5,
-  "quality_issues": 2,
-  "sources": 4
-}
