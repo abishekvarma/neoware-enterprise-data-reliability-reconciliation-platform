@@ -11,12 +11,17 @@ A reusable reliability control plane for heterogeneous enterprise data. The sour
 SOURCE → ADAPTER → RAW BRONZE → PARSED BRONZE → PROFILE → QUALITY GATE → QUARANTINE → SILVER → RELIABILITY SCORE → GOLD → AUDIT
 
 Supported sources:
-- File upload: CSV, JSON, JSONL, Parquet
-- HTTP/REST GET
+- File upload: CSV, Excel, JSON, JSONL, Parquet
+- HTTP/REST GET or POST
 - Amazon S3 object
 - Azure Blob / ADLS object or SAS URL
-- SQL database query
+- Google Cloud Storage object
+- SQL database query (SQLAlchemy)
 - Local path for development
+
+## Source contract
+
+Every registered source must provide three core release-contract fields: required columns, a unique key (including composite keys), and a freshness column with an SLA. Optional controls include expected schema, numeric ranges, regex validation, referential integrity, and rejection of unexpected columns. Authenticated connectors receive secret references/environment-variable names; secret values are never entered into the UI or committed to Git.
 
 ## Ten engineering controls
 
@@ -53,6 +58,10 @@ Credentials are never committed. API tokens and database connection strings are 
 ## Production deployment mapping
 
 The local implementation is runnable and intentionally keeps cloud services optional. The same contracts map to Azure Data Factory/orchestration, ADLS Gen2 or S3, Azure Databricks/Spark, Delta Lake Bronze/Silver/Gold, catalog/lineage, CI/CD, monitoring, alerting and secret management. These are architecture targets until actually deployed and tested.
+
+## Run monitoring
+
+The Streamlit monitor uses a persistent DAG-style execution view inspired by modern pipeline monitoring UIs: each stage changes state while the run executes, shows duration, records event messages, and turns red/orange when a schema, quality, relationship, or release-gate problem occurs. The final run view exposes row counts, quality dimensions, quarantine reasons, and the exact release decision. This is a local reference implementation, not a Databricks UI clone.
 
 ## What to show a reviewer
 
