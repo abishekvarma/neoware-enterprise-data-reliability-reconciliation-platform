@@ -304,7 +304,6 @@ if st.session_state.sources:
             draw_monitor()
 
             def on_event(event):
-                nonlocal current_stage_name
                 idx=event.get("stage_index",-1)
                 current_stage_name=event.get("stage","Pipeline")
                 state["stage"]=idx
