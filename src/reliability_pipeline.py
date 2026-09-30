@@ -93,6 +93,10 @@ def freshness_pct(df:DataFrame,column:str|None,sla_hours:float|None)->float:
 def reliability_score(metrics:dict[str,float])->float:
     return round(sum(metrics[k]*WEIGHTS[k] for k in WEIGHTS),2)
 
+def _event(callback, event, stage_index=-1, stage="", source="", message=""):
+    if callback:
+        callback({"event":event,"stage_index":stage_index,"stage":stage,"source":source,"message":message})
+
 def _append_jsonl(path:Path,row:dict):
     path.parent.mkdir(parents=True,exist_ok=True)
     with path.open("a",encoding="utf-8") as fh: fh.write(json.dumps(row,default=str)+"\n")
@@ -101,7 +105,7 @@ def _read_history(path:Path)->set[str]:
     if not path.exists(): return set()
     return {json.loads(x)["fingerprint"] for x in path.read_text(encoding="utf-8").splitlines() if x.strip() and "fingerprint" in json.loads(x)}
 
-def run(manifest_path="data/run_manifest.json",output_root="output",force=False)->dict:
+def run(manifest_path="data/run_manifest.json",output_root="output",force=False,on_event=None)->dict:
     manifest=json.loads(Path(manifest_path).read_text(encoding="utf-8")); run_id=manifest.get("run_id") or uuid.uuid4().hex[:16]
     started=time.time(); root=Path(output_root); root.mkdir(parents=True,exist_ok=True)
     history=root/"audit"/"history.jsonl"; seen=_read_history(history)
@@ -114,7 +118,9 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False)
             fingerprint=sha256_path(path)
             if fingerprint in seen and not force:
                 results.append({"source":spec["name"],"status":"SKIPPED_IDEMPOTENT","fingerprint":fingerprint}); continue
+            _event(on_event,"stage_start",0,"Ingest",spec["name"],"Reading source")
             df=read_source(spark,str(path),spec.get("format"))
+            _event(on_event,"stage_done",0,"Ingest",spec["name"],"Source materialized")
             batch=fingerprint[:16]
             df=df.withColumn("_source",F.lit(spec["name"])).withColumn("_batch_id",F.lit(batch)).withColumn("_ingested_at",F.current_timestamp())
             prepared.append((spec,path,fingerprint,batch,df)); references[spec["name"]]=df
@@ -123,14 +129,30 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False)
             base=root/"runs"/run_id
             for layer in ("bronze_raw","bronze","profiling","quarantine","silver","gold"): (base/layer/spec["name"]/batch).mkdir(parents=True,exist_ok=True)
             if path.is_file(): shutil.copy2(path,base/"bronze_raw"/spec["name"]/batch/path.name)
-            total=df.count(); df.write.mode("overwrite").parquet(str(base/"bronze"/spec["name"]/batch))
+            _event(on_event,"stage_start",1,"Raw Bronze",spec["name"],"Preserving original bytes")
+            _event(on_event,"stage_done",1,"Raw Bronze",spec["name"],"Raw batch preserved")
+            _event(on_event,"stage_start",2,"Profile",spec["name"],"Counting rows, columns and nulls")
+            total=df.count()
+            df.write.mode("overwrite").parquet(str(base/"bronze"/spec["name"]/batch))
+            _event(on_event,"stage_done",2,"Profile",spec["name"],f"{total:,} rows profiled")
             prof=profile(df); (base/"profiling"/spec["name"]/batch/"profile.json").write_text(json.dumps(prof,indent=2,default=str),encoding="utf-8")
-            schema_errors=schema_check(df,spec); checked,rule_meta=apply_quality(df,spec,references)
+            _event(on_event,"stage_start",3,"Schema",spec["name"],"Checking data contract")
+            schema_errors=schema_check(df,spec)
+            _event(on_event,"stage_done" if not schema_errors else "stage_error",3,"Schema",spec["name"],"Schema contract passed" if not schema_errors else "; ".join(schema_errors))
+            _event(on_event,"stage_start",4,"Quality",spec["name"],"Applying configurable quality rules")
+            checked,rule_meta=apply_quality(df,spec,references)
+            _event(on_event,"stage_done",4,"Quality",spec["name"],f"{rule_meta['rule_count']} rules evaluated")
             failed=checked.filter(F.col("_quality_failed")); valid=checked.filter(~F.col("_quality_failed"))
+            _event(on_event,"stage_start",5,"Quarantine",spec["name"],"Separating failed records")
             failed_count,valid_count=failed.count(),valid.count()
+            _event(on_event,"stage_done",5,"Quarantine",spec["name"],f"{failed_count:,} records quarantined")
             failed_out=failed.drop("_dup_count","_ref_value","_quality_failed")
             valid_out=valid.drop("_dup_count","_ref_value","_quality_failed","_failure_reason")
-            failed_out.write.mode("overwrite").parquet(str(base/"quarantine"/spec["name"]/batch)); valid_out.write.mode("overwrite").parquet(str(base/"silver"/spec["name"]/batch))
+            failed_out.write.mode("overwrite").parquet(str(base/"quarantine"/spec["name"]/batch))
+            valid_out.write.mode("overwrite").parquet(str(base/"silver"/spec["name"]/batch))
+            _event(on_event,"stage_start",6,"Silver",spec["name"],"Writing trusted records")
+            _event(on_event,"stage_done",6,"Silver",spec["name"],f"{valid_count:,} valid records promoted")
+            _event(on_event,"stage_start",7,"Integrity",spec["name"],"Evaluating relationships")
             required=[c for c in spec.get("required_columns",[]) if c in df.columns]
             if required:
                 complete=F.lit(True)
@@ -147,12 +169,21 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False)
                     vals=ref_df.select(F.col(ref["reference_column"]).alias("_ref")).dropDuplicates()
                     ri=valid.join(vals,valid[ref["column"]]==F.col("_ref"),"left_semi").count()/total*100 if total else 100.0
             fresh=freshness_pct(df,spec.get("freshness_column"),spec.get("freshness_sla_hours"))
+            _event(on_event,"stage_done",7,"Integrity",spec["name"],f"Referential integrity {ri:.2f}%")
             metrics={"completeness":round(completeness,2),"validity":round(validity,2),"uniqueness":round(uniqueness,2),"referential_integrity":round(ri,2),"freshness":round(fresh,2)}
             score=reliability_score(metrics); threshold=float(spec.get("pass_threshold",manifest.get("pass_threshold",95)))
             status="SCHEMA_REVIEW" if schema_errors else ("PASS" if score>=threshold else "REVIEW")
-            if status=="PASS": valid_out.withColumn("_gold_created_at",F.current_timestamp()).write.mode("overwrite").parquet(str(base/"gold"/spec["name"]/batch))
+            _event(on_event,"stage_start",8,"Gold",spec["name"],f"Release gate: {status}")
+            if status=="PASS":
+                valid_out.withColumn("_gold_created_at",F.current_timestamp()).write.mode("overwrite").parquet(str(base/"gold"/spec["name"]/batch))
+                _event(on_event,"stage_done",8,"Gold",spec["name"],"Trusted dataset released")
+            else:
+                _event(on_event,"stage_error",8,"Gold",spec["name"],f"Gold blocked because status={status}")
             audit={"run_id":run_id,"source":spec["name"],"source_type":spec["type"],"batch_id":batch,"fingerprint":fingerprint,"rows_received":total,"rows_valid":valid_count,"rows_quarantined":failed_count,"metrics":metrics,"reliability_score_pct":score,"threshold_pct":threshold,"status":status,"schema_errors":schema_errors,"quality_rules":rule_meta,"processed_at":utc_now(),"duration_seconds":round(time.time()-started,2)}
-            _append_jsonl(history,audit); results.append(audit)
+            _event(on_event,"stage_start",9,"Audit",spec["name"],"Writing audit and reliability score")
+            _append_jsonl(history,audit)
+            results.append(audit)
+            _event(on_event,"stage_done",9,"Audit",spec["name"],f"Reliability {score}%")
         summary={"run_id":run_id,"status":"COMPLETED","sources_processed":len(prepared),"finished_at":utc_now(),"duration_seconds":round(time.time()-started,2)}
         (root/"audit"/"latest.json").write_text(json.dumps({"run":summary,"results":results},indent=2,default=str),encoding="utf-8")
         return {"run_id":run_id,"status":"COMPLETED","results":results,"duration_seconds":summary["duration_seconds"]}
