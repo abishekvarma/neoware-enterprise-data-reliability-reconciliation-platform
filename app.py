@@ -57,8 +57,15 @@ with st.form("source"):
         if rs and rc and rk:spec["reference"]={"source":rs,"column":rc,"reference_column":rk}
     add=st.form_submit_button("Add source to run plan",type="primary")
 if add:
-    if not spec["name"]:st.error("Source name is required.")
-    else:st.session_state.sources.append((spec,uploaded)); st.success(f"Added {spec['name']}.")
+    try:
+        if not spec["name"]: raise ValueError("Source name is required.")
+        if kind=="File upload" and uploaded is None: raise ValueError("Select a file first.")
+        contract_present=bool(spec["required_columns"] or spec.get("expected_schema") or spec.get("unique_key") or spec.get("numeric_rules") or spec.get("regex_rules") or (ref_source and ref_column and ref_key))
+        if not contract_present: raise ValueError("A release contract is required. Add required columns, a unique key, expected schema, numeric/regex rules, or a reference rule. Uncontracted data cannot be released.")
+        st.session_state.sources.append((spec,uploaded))
+        st.success(f"Added {spec['name']} with a release contract.")
+    except Exception as exc:
+        st.error(f"Configuration error: {exc}")
 if st.session_state.sources:
     st.markdown("## 2 · Run plan")
     for i,(s,_) in enumerate(st.session_state.sources,1):st.markdown(f'<div class="card"><b>{i}. {s["name"]}</b> · {s["type"]}<br><span class="small">Required: {", ".join(s["required_columns"]) or "none"} · Key: {s["unique_key"] or "none"} · SLA: {s["freshness_sla_hours"]}h</span></div>',unsafe_allow_html=True)
