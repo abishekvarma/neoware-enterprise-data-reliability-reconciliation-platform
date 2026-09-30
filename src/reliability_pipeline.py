@@ -112,7 +112,7 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False,
     manifest=json.loads(Path(manifest_path).read_text(encoding="utf-8")); run_id=manifest.get("run_id") or uuid.uuid4().hex[:16]
     started=time.time(); root=Path(output_root); root.mkdir(parents=True,exist_ok=True)
     history=root/"audit"/"history.jsonl"; seen=_read_history(history)
-    spark=(SparkSession.builder.appName("EnterpriseDataReliabilityReadiness").master(manifest.get("spark_master","local[*]")).config("spark.sql.shuffle.partitions",str(manifest.get("shuffle_partitions",8))).config("spark.sql.adaptive.enabled","true").getOrCreate())
+    spark=(SparkSession.builder.appName("EnterpriseDataReliabilityReadiness").master(manifest.get("spark_master","local[*]")).config("spark.sql.shuffle.partitions",str(manifest.get("shuffle_partitions",8))).config("spark.sql.adaptive.enabled","true").config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version","2").config("spark.hadoop.mapreduce.fileoutputcommitter.cleanup-failures.ignored","true").config("spark.hadoop.io.native.lib.available","false").config("spark.hadoop.fs.file.impl","org.apache.hadoop.fs.RawLocalFileSystem").getOrCreate())
     spark.sparkContext.setLogLevel("WARN"); results=[]; references={}; prepared=[]
     try:
         for spec in manifest["sources"]:
