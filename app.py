@@ -38,6 +38,16 @@ st.markdown("""
 
 if "sources" not in st.session_state: st.session_state.sources=[]
 if "last_result" not in st.session_state: st.session_state.last_result=None
+if "last_run_id" not in st.session_state: st.session_state.last_run_id=None
+# Restore the latest completed run after a browser refresh/restart.
+if st.session_state.last_result is None:
+    _latest=OUTPUT/"audit"/"latest.json"
+    if _latest.exists():
+        try:
+            st.session_state.last_result=json.loads(_latest.read_text(encoding="utf-8"))
+            st.session_state.last_run_id=st.session_state.last_result.get("run",{}).get("run_id")
+        except Exception:
+            pass
 
 STAGES=[
 ("01","Ingest"),("02","Raw Bronze"),("03","Profile"),("04","Schema"),
@@ -380,3 +390,192 @@ st.table([
 {"Source":"Local path","What the developer gives":"Path to the dataset on the runtime machine","Secret":"None"},
 ])
 st.caption("The UI intentionally asks for secret references, not secret values. This keeps credentials out of the Git repository and aligns the source adapter boundary with production secret-management practices.")
+
+
+# LAYER_EXPLORER_V2
+# ---------------------------------------------------------------------------
+# Data-proof UI: inspect persisted datasets without loading the full dataset
+# into the browser. Spark performs the expensive work; Streamlit receives a
+# bounded sample and aggregate metadata.
+@st.cache_resource(show_spinner=False)
+def _explorer_spark():
+    from pyspark.sql import SparkSession
+    spark=(SparkSession.builder.appName("ReliabilityLayerExplorer")
+           .master("local[*]")
+           .config("spark.sql.shuffle.partitions","8")
+           .config("spark.sql.adaptive.enabled","true")
+           .getOrCreate())
+    spark.sparkContext.setLogLevel("ERROR")
+    return spark
+
+def _layer_path(run_id,row,layer):
+    return OUTPUT/"runs"/run_id/layer/row["source"]/row["batch_id"]
+
+def _layer_snapshot(run_id,row,layer,sample_rows=200):
+    from pyspark.sql import functions as F
+    path=_layer_path(run_id,row,layer)
+    if not path.exists():
+        return {"available":False,"error":f"{layer} was not produced for this batch."}
+    try:
+        df=_explorer_spark().read.parquet(str(path))
+        rows=df.count()
+        cols=df.columns
+        nulls={}
+        if cols:
+            expr=[F.sum(F.when(F.col(col).isNull() | (F.trim(F.col(col).cast("string"))==""),1).otherwise(0)).alias(col) for col in cols]
+            nulls={k:int(v or 0) for k,v in df.agg(*expr).first().asDict().items()}
+        return {
+            "available":True,
+            "rows":rows,
+            "columns":len(cols),
+            "column_names":cols,
+            "nulls":nulls,
+            "sample":df.limit(sample_rows).toPandas(),
+        }
+    except Exception as exc:
+        return {"available":False,"error":f"{type(exc).__name__}: {exc}"}
+
+def _render_layer_tab(run_id,row,layer):
+    snap=_layer_snapshot(run_id,row,layer,200)
+    if not snap["available"]:
+        st.warning(snap["error"])
+        return
+    a,b,c=st.columns(3)
+    a.metric("Rows",f"{snap['rows']:,}")
+    b.metric("Columns",snap["columns"])
+    c.metric("Sample shown",min(200,snap["rows"]))
+    st.dataframe(snap["sample"],use_container_width=True,height=360)
+    st.caption("The complete dataset remains in Parquet. Only a bounded sample is brought into the browser.")
+    with st.expander("Schema + full null profile"):
+        st.json({"columns":snap["column_names"],"nulls":snap["nulls"]})
+    if layer=="quarantine" and "_failure_reason" in snap["sample"].columns:
+        reasons=(snap["sample"]["_failure_reason"].value_counts()
+                 .rename_axis("failure_reason").reset_index(name="sample_count"))
+        st.dataframe(reasons,use_container_width=True)
+
+def _render_layer_explorer():
+    payload=st.session_state.get("last_result")
+    if not payload or not payload.get("results"):
+        return
+    run_id=payload.get("run",{}).get("run_id") or st.session_state.get("last_run_id")
+    rows=[r for r in payload["results"] if r.get("batch_id") and r.get("source")]
+    if not run_id or not rows:
+        return
+
+    st.markdown('<div class="section">4 · Layer Explorer & Data Proof</div>',unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sub">The pipeline graph answers <b>what happened</b>. '
+        'This explorer answers <b>what data was actually produced</b>. '
+        'It is safe for 1M+ row datasets because Spark counts/aggregates the full '
+        'Parquet data while the browser receives only a small sample.</div>',
+        unsafe_allow_html=True,
+    )
+
+    source_names=[r["source"] for r in rows]
+    source=st.selectbox("Inspect source",source_names,key="layer_explorer_source")
+    row=next(r for r in rows if r["source"]==source)
+
+    tabs=st.tabs(["Raw Bronze","Bronze","Profile","Quarantine","Silver","Gold","Compare","Lineage"])
+
+    with tabs[0]:
+        raw_dir=_layer_path(run_id,row,"bronze_raw")
+        files=list(raw_dir.iterdir()) if raw_dir.exists() else []
+        if not files:
+            st.warning("Raw Bronze artifact was not found.")
+        else:
+            f=files[0]
+            st.markdown(
+                f'<div class="success-box"><b>Raw Bronze preserved</b><br>'
+                f'Original artifact: <b>{f.name}</b><br>'
+                f'Size: {f.stat().st_size:,} bytes<br>'
+                f'Batch: {row["batch_id"]}</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("This is the immutable source copy. The next tab is the Spark-readable Bronze dataset.")
+
+    with tabs[1]:
+        _render_layer_tab(run_id,row,"bronze")
+
+    with tabs[2]:
+        profile_file=OUTPUT/"runs"/run_id/"profiling"/row["source"]/row["batch_id"]/"profile.json"
+        if profile_file.exists():
+            prof=json.loads(profile_file.read_text(encoding="utf-8"))
+            a,b,c=st.columns(3)
+            a.metric("Rows",f'{prof.get("rows",0):,}')
+            b.metric("Columns",prof.get("columns",0))
+            c.metric("Profiled fields",len(prof.get("column_names",[])))
+            st.json(prof)
+        else:
+            st.warning("Profile artifact was not found.")
+
+    with tabs[3]:
+        _render_layer_tab(run_id,row,"quarantine")
+
+    with tabs[4]:
+        _render_layer_tab(run_id,row,"silver")
+
+    with tabs[5]:
+        _render_layer_tab(run_id,row,"gold")
+
+    with tabs[6]:
+        layer_names=["bronze","quarantine","silver","gold"]
+        ca,cb=st.columns(2)
+        left=ca.selectbox("Compare layer A",layer_names,index=0,key="compare_layer_a")
+        right=cb.selectbox("Compare layer B",layer_names,index=2,key="compare_layer_b")
+        if left==right:
+            st.info("Choose two different layers.")
+        else:
+            sa=_layer_snapshot(run_id,row,left,100)
+            sb=_layer_snapshot(run_id,row,right,100)
+            if not sa["available"] or not sb["available"]:
+                st.warning(sa.get("error") or sb.get("error"))
+            else:
+                common=sorted(set(sa["column_names"]) & set(sb["column_names"]))
+                added=sorted(set(sb["column_names"])-set(sa["column_names"]))
+                removed=sorted(set(sa["column_names"])-set(sb["column_names"]))
+                m=st.columns(4)
+                m[0].metric("Rows A",f'{sa["rows"]:,}')
+                m[1].metric("Rows B",f'{sb["rows"]:,}')
+                m[2].metric("Row delta",f'{sb["rows"]-sa["rows"]:+,}')
+                m[3].metric("Common columns",len(common))
+                st.markdown(
+                    f'<div class="card"><b>Schema movement</b><br>'
+                    f'<span style="color:#168454;font-weight:800">Added in {right}: {", ".join(added) if added else "None"}</span><br>'
+                    f'<span style="color:#c33c3c;font-weight:800">Removed in {right}: {", ".join(removed) if removed else "None"}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                null_rows=[]
+                for col in common:
+                    null_rows.append({
+                        "column":col,
+                        f"{left}_nulls":sa["nulls"].get(col,0),
+                        f"{right}_nulls":sb["nulls"].get(col,0),
+                        "null_delta":sb["nulls"].get(col,0)-sa["nulls"].get(col,0),
+                    })
+                st.dataframe(null_rows,use_container_width=True,height=330)
+                x,y=st.columns(2)
+                x.caption(f"{left} sample")
+                x.dataframe(sa["sample"],use_container_width=True,height=260)
+                y.caption(f"{right} sample")
+                y.dataframe(sb["sample"],use_container_width=True,height=260)
+
+    with tabs[7]:
+        st.markdown(
+            '<div class="card"><b>Batch lineage</b><br><br>'
+            'Source → <b>Raw Bronze</b> → <b>Bronze</b> → <b>Profile / Schema</b> '
+            '→ <b>Quality</b> → <b>Quarantine / Silver</b> → <b>Integrity</b> '
+            '→ <b>Gold</b> → <b>Audit</b></div>',
+            unsafe_allow_html=True,
+        )
+        st.code(
+            f"output/runs/{run_id}/\n"
+            f"  bronze_raw/{row['source']}/{row['batch_id']}/\n"
+            f"  bronze/{row['source']}/{row['batch_id']}/\n"
+            f"  profiling/{row['source']}/{row['batch_id']}/profile.json\n"
+            f"  quarantine/{row['source']}/{row['batch_id']}/\n"
+            f"  silver/{row['source']}/{row['batch_id']}/\n"
+            f"  gold/{row['source']}/{row['batch_id']}/",
+            language="text",
+        )
+
+_render_layer_explorer()
