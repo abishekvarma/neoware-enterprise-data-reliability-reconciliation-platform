@@ -60,7 +60,7 @@ if add:
     try:
         if not spec["name"]: raise ValueError("Source name is required.")
         if kind=="File upload" and uploaded is None: raise ValueError("Select a file first.")
-        contract_present=bool(spec["required_columns"] or spec.get("expected_schema") or spec.get("unique_key") or spec.get("numeric_rules") or spec.get("regex_rules") or (ref_source and ref_column and ref_key))
+        contract_present=bool(spec["required_columns"] or spec.get("expected_schema") or spec.get("unique_key") or spec.get("numeric_rules") or spec.get("regex_rules") or spec.get("reference"))
         if not contract_present: raise ValueError("A release contract is required. Add required columns, a unique key, expected schema, numeric/regex rules, or a reference rule. Uncontracted data cannot be released.")
         st.session_state.sources.append((spec,uploaded))
         st.success(f"Added {spec['name']} with a release contract.")
