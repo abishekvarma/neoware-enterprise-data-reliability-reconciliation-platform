@@ -1,9 +1,0 @@
-order_id,customer_id,order_amount,order_date,source,customer_name,city,state,status,record_status
-O1001,C001,125000,2026-09-01,orders_api,Acme Retail,Bengaluru,Karnataka,active,TRUSTED
-O1002,C002,98000,2026-09-01,orders_api,Northstar Foods,Pune,Maharashtra,active,TRUSTED
-O1004,C004,73000,2026-09-02,orders_api,BluePeak Energy,Chennai,Tamil Nadu,active,TRUSTED
-O1005,C005,215000,2026-09-03,orders_api,Nova Manufacturing,Mumbai,Maharashtra,active,TRUSTED
-O1006,C006,67000,2026-09-03,orders_api,Orion Media,Delhi,Delhi,active,TRUSTED
-O1007,C007,88000,2026-09-04,orders_api,GreenGrid Utilities,Bengaluru,Karnataka,active,TRUSTED
-O1008,C008,134000,2026-09-04,orders_api,Aster Pharma,Pune,Maharashtra,active,TRUSTED
-O1009,C009,54000,2026-09-05,orders_api,Summit Sports,Kolkata,West Bengal,active,TRUSTED
