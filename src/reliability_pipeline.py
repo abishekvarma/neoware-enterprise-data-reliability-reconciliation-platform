@@ -156,12 +156,14 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False,
             required=[c for c in spec.get("required_columns",[]) if c in df.columns]
             if required:
                 complete=F.lit(True)
-                for c in required: complete=complete&F.col(c).isNotNull()&(F.trim(F.col(c).cast("string"))!="")
-                completeness=valid.filter(complete).count()/total*100 if total else 100.0
-            else: completeness=100.0
+                for c in required:
+                    complete=complete&F.col(c).isNotNull()&(F.trim(F.col(c).cast("string"))!="")
+                completeness=df.filter(complete).count()/total*100 if total else 100.0
+            else:
+                completeness=100.0
             validity=valid_count/total*100 if total else 100.0
             key=spec.get("unique_key")
-            uniqueness=valid.select(key).dropDuplicates().count()/valid_count*100 if key and key in valid.columns and valid_count else 100.0
+            uniqueness=(df.select(key).dropDuplicates().count()/total*100 if key and key in df.columns and total else 100.0)
             ri=100.0; ref=spec.get("reference")
             if ref and ref.get("source") in references and ref.get("column") in valid.columns:
                 ref_df=references[ref["source"]]
@@ -172,14 +174,16 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False,
             _event(on_event,"stage_done",7,"Integrity",spec["name"],f"Referential integrity {ri:.2f}%")
             metrics={"completeness":round(completeness,2),"validity":round(validity,2),"uniqueness":round(uniqueness,2),"referential_integrity":round(ri,2),"freshness":round(fresh,2)}
             score=reliability_score(metrics); threshold=float(spec.get("pass_threshold",manifest.get("pass_threshold",95)))
-            status="SCHEMA_REVIEW" if schema_errors else ("PASS" if score>=threshold else "REVIEW")
+            contract_present=bool(spec.get("required_columns") or spec.get("expected_schema") or spec.get("unique_key") or spec.get("numeric_rules") or spec.get("regex_rules") or spec.get("reference"))
+            status="SCHEMA_REVIEW" if schema_errors else ("NO_CONTRACT" if not contract_present else ("PASS" if score>=threshold else "REVIEW"))
+            reason_counts={str(r["_failure_reason"]):int(r["count"]) for r in failed.groupBy("_failure_reason").count().orderBy(F.desc("count")).limit(20).collect()}
             _event(on_event,"stage_start",8,"Gold",spec["name"],f"Release gate: {status}")
             if status=="PASS":
                 valid_out.withColumn("_gold_created_at",F.current_timestamp()).write.mode("overwrite").parquet(str(base/"gold"/spec["name"]/batch))
                 _event(on_event,"stage_done",8,"Gold",spec["name"],"Trusted dataset released")
             else:
                 _event(on_event,"stage_error",8,"Gold",spec["name"],f"Gold blocked because status={status}")
-            audit={"run_id":run_id,"source":spec["name"],"source_type":spec["type"],"batch_id":batch,"fingerprint":fingerprint,"rows_received":total,"rows_valid":valid_count,"rows_quarantined":failed_count,"metrics":metrics,"reliability_score_pct":score,"threshold_pct":threshold,"status":status,"schema_errors":schema_errors,"quality_rules":rule_meta,"processed_at":utc_now(),"duration_seconds":round(time.time()-started,2)}
+            audit={"run_id":run_id,"source":spec["name"],"source_type":spec["type"],"batch_id":batch,"fingerprint":fingerprint,"rows_received":total,"rows_valid":valid_count,"rows_quarantined":failed_count,"metrics":metrics,"reliability_score_pct":score,"threshold_pct":threshold,"status":status,"schema_errors":schema_errors,"quality_rules":rule_meta,"failure_reason_counts":reason_counts,"processed_at":utc_now(),"duration_seconds":round(time.time()-started,2)}
             _event(on_event,"stage_start",9,"Audit",spec["name"],"Writing audit and reliability score")
             _append_jsonl(history,audit)
             results.append(audit)
