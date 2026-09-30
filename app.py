@@ -97,7 +97,28 @@ if st.session_state.last_result:
     p=st.session_state.last_result; st.markdown("## 3 · Run result"); st.caption(f"Run ID: {p['run']['run_id']} · Duration: {p['run']['duration_seconds']}s")
     for row in p["results"]:
         if row.get("status")=="SKIPPED_IDEMPOTENT":st.info(f"{row['source']}: skipped safely because the same fingerprint was already processed."); continue
-        m1,m2,m3,m4,m5=st.columns(5); m1.metric("Rows received",row["rows_received"]); m2.metric("Quarantined",row["rows_quarantined"]); m3.metric("Completeness",f"{row['metrics']['completeness']}%"); m4.metric("Reliability",f"{row['reliability_score_pct']}%"); m5.metric("Status",row["status"]); st.progress(min(max(row["reliability_score_pct"]/100,0),1))
-        with st.expander(f"{row['source']} · quality and audit details"):st.json({"metrics":row["metrics"],"schema_errors":row["schema_errors"],"quality_rules":row["quality_rules"],"batch_id":row["batch_id"],"fingerprint":row["fingerprint"]})
+        st.markdown(f"### {row['source']} · execution graph")
+        st.markdown(render_graph(row=row),unsafe_allow_html=True)
+        m1,m2,m3,m4,m5=st.columns(5)
+        m1.metric("Rows received",f"{row['rows_received']:,}")
+        m2.metric("Rows valid",f"{row['rows_valid']:,}")
+        m3.metric("Quarantined",f"{row['rows_quarantined']:,}")
+        m4.metric("Reliability",f"{row['reliability_score_pct']}%")
+        m5.metric("Status",row["status"])
+        st.progress(min(max(row["reliability_score_pct"]/100,0),1))
+        q=st.columns(5)
+        for col,(label,key) in zip(q,[("Completeness","completeness"),("Validity","validity"),("Uniqueness","uniqueness"),("Referential integrity","referential_integrity"),("Freshness","freshness")]):
+            col.metric(label,f"{row['metrics'][key]}%")
+        if row["rows_quarantined"]>0:
+            st.warning(f"{row['rows_quarantined']:,} records failed quality controls and were quarantined. They were not promoted to trusted data.")
+            with st.expander("Exact quarantine reasons"):
+                st.json(row.get("failure_reason_counts",{}))
+        if row.get("schema_errors"):
+            st.error("Schema contract failed — Gold release is blocked.")
+            st.json(row["schema_errors"])
+        if row.get("status")=="NO_CONTRACT":
+            st.error("No release contract was defined. The pipeline refuses to publish ungoverned data.")
+        with st.expander(f"{row['source']} · full audit and contract evidence"):
+            st.json({"metrics":row["metrics"],"schema_errors":row["schema_errors"],"quality_rules":row["quality_rules"],"failure_reason_counts":row.get("failure_reason_counts",{}),"batch_id":row["batch_id"],"fingerprint":row["fingerprint"],"threshold_pct":row.get("threshold_pct")})
     st.success("Artifacts: output/runs/<run_id>/{bronze_raw,bronze,profiling,quarantine,silver,gold} plus audit history.")
 else:st.info("Add one or more sources to create a run plan. Nothing executes until you click the pipeline button.")
