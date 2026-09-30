@@ -12,11 +12,11 @@ if "sources" not in st.session_state:st.session_state.sources=[]
 if "last_result" not in st.session_state:st.session_state.last_result=None
 st.markdown("""<div class="hero"><div style="font-size:.8rem;letter-spacing:.15em;color:#a9c3d0">DATA ENGINEERING • PRODUCTION-STYLE REFERENCE IMPLEMENTATION</div><h1>Enterprise Data Reliability & Readiness Platform</h1><p>Connect a source. Preserve the raw batch. Profile it. Enforce configurable quality controls. Quarantine failures. Produce trusted Silver/Gold data. Record an auditable reliability score. The reliability engine is independent of the source type.</p></div>""",unsafe_allow_html=True)
 a,b,c,d=st.columns(4); a.metric("Source adapters","6"); b.metric("Formats","4"); c.metric("Quality dimensions","5"); d.metric("Pipeline controls","10")
-st.divider(); st.markdown("## 1 · Register a source"); st.caption("No customer/order/product schema is hard-coded. Each source defines its own contract.")
+st.divider(); st.markdown("## 1 · Register a source"); st.caption("CSV, Excel, JSON, JSONL and Parquet uploads are accepted. API, cloud and database sources use the same downstream reliability engine.")
 with st.form("source"):
     c1,c2=st.columns(2); name=c1.text_input("Source name",placeholder="erp_orders"); kind=c2.selectbox("Source type",["File upload","API / HTTP","Amazon S3","Azure Blob / ADLS","Database","Local path"])
     uploaded=None; spec={"name":name.strip(),"type":kind}
-    if kind=="File upload":uploaded=st.file_uploader("Upload data",type=["csv","json","jsonl","parquet"],max_upload_size=2048)
+    if kind=="File upload":uploaded=st.file_uploader("Upload data",type=["csv","xlsx","xlsm","json","jsonl","parquet"],max_upload_size=4096)
     elif kind=="API / HTTP":
         spec["url"]=st.text_input("GET endpoint",placeholder="https://api.example.com/v1/orders"); spec["auth_env"]=st.text_input("Auth token environment variable",placeholder="API_TOKEN"); spec["auth_header"]=st.text_input("Auth header",value="Authorization")
     elif kind=="Amazon S3":spec["uri"]=st.text_input("S3 object",placeholder="s3://bucket/path/data.parquet")
