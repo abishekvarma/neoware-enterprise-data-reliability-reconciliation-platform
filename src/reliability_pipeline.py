@@ -55,11 +55,14 @@ def apply_quality(df:DataFrame,spec:dict,references:dict[str,DataFrame])->tuple[
             bad=F.col(c).isNull()|(F.trim(F.col(c).cast("string"))==""); checks.append((f"required:{c}",~bad))
         else: checks.append((f"missing_column:{c}",F.lit(False)))
     key=spec.get("unique_key")
-    if key:
-        if key not in df.columns: checks.append((f"missing_unique_key:{key}",F.lit(False)))
+    key_cols=[x.strip() for x in str(key or "").split(",") if x.strip()]
+    if key_cols:
+        missing=[x for x in key_cols if x not in df.columns]
+        if missing:
+            checks.append((f"missing_unique_key:{','.join(missing)}",F.lit(False)))
         else:
-            df=df.withColumn("_dup_count",F.count("*").over(Window.partitionBy(key)))
-            checks.append((f"unique:{key}",F.col("_dup_count")==1))
+            df=df.withColumn("_dup_count",F.count("*").over(Window.partitionBy(*key_cols)))
+            checks.append((f"unique:{','.join(key_cols)}",F.col("_dup_count")==1))
     for rule in spec.get("numeric_rules",[]):
         c=rule.get("column")
         if c in df.columns:
@@ -163,7 +166,8 @@ def run(manifest_path="data/run_manifest.json",output_root="output",force=False,
                 completeness=100.0
             validity=valid_count/total*100 if total else 100.0
             key=spec.get("unique_key")
-            uniqueness=(df.select(key).dropDuplicates().count()/total*100 if key and key in df.columns and total else 100.0)
+            key_cols=[x.strip() for x in str(key or "").split(",") if x.strip()]
+            uniqueness=(df.select(*key_cols).dropDuplicates().count()/total*100 if key_cols and all(x in df.columns for x in key_cols) and total else 100.0)
             ri=100.0; ref=spec.get("reference")
             if ref and ref.get("source") in references and ref.get("column") in valid.columns:
                 ref_df=references[ref["source"]]
