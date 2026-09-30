@@ -65,21 +65,34 @@ if st.session_state.sources:
     c1,c2=st.columns([1,5]); force=c1.checkbox("Force reprocess")
     if c1.button("Clear plan"):st.session_state.sources=[]; st.rerun()
     if c2.button("▶ Execute full reliability pipeline",type="primary"):
+        INCOMING.mkdir(parents=True,exist_ok=True)
+        for p in INCOMING.iterdir():
+            if p.is_file():p.unlink()
         try:
-            INCOMING.mkdir(parents=True,exist_ok=True)
-            for p in INCOMING.iterdir():
-                if p.is_file():p.unlink()
             runtime=[]
             for s,up in st.session_state.sources:
-                materialized=materialize_source(s,up,INCOMING); item=dict(s); item["materialized_path"]=str(materialized); item["format"]=Path(materialized).suffix.lstrip("."); runtime.append(item)
-            run_id=uuid.uuid4().hex[:16]; manifest={"run_id":run_id,"sources":runtime,"pass_threshold":min(x.get("pass_threshold",95) for x in runtime),"shuffle_partitions":8}
-            mp=BASE/"data"/"run_manifest.json"; mp.write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-            with st.status("Executing Bronze → Profile → Quality → Quarantine → Silver → Gold → Audit",expanded=True) as status:
-                result=subprocess.run([sys.executable,"-m","src.run_pipeline","--manifest",str(mp),"--output",str(OUTPUT)]+(["--force"] if force else []),cwd=BASE,capture_output=True,text=True)
-                if result.returncode:status.update(label="Pipeline failed",state="error"); st.code(result.stdout+"\n"+result.stderr)
-                else:status.update(label="Pipeline completed",state="complete")
-            if result.returncode==0:st.session_state.last_result=json.loads((OUTPUT/"audit"/"latest.json").read_text())
-        except Exception as exc:st.error(str(exc)); st.exception(exc)
+                materialized=materialize_source(s,up,INCOMING)
+                item=dict(s); item["materialized_path"]=str(materialized); item["format"]=Path(materialized).suffix.lstrip(".").lower(); runtime.append(item)
+            run_id=uuid.uuid4().hex[:16]
+            mp=BASE/"data"/"run_manifest.json"
+            mp.write_text(json.dumps({"run_id":run_id,"sources":runtime,"pass_threshold":min(x.get("pass_threshold",95) for x in runtime),"shuffle_partitions":8},indent=2),encoding="utf-8")
+            st.markdown("### Live execution")
+            graph_box=st.empty(); event_box=st.empty()
+            state={"stage":-1,"done":-1,"error":-1}
+            graph_box.markdown(render_graph(state),unsafe_allow_html=True)
+            def on_event(event):
+                state["stage"]=event.get("stage_index",-1)
+                if event.get("event")=="stage_done": state["done"]=max(state["done"],event.get("stage_index",-1))
+                if event.get("event")=="stage_error": state["error"]=event.get("stage_index",-1)
+                graph_box.markdown(render_graph(state),unsafe_allow_html=True)
+                prefix="✓" if event.get("event")=="stage_done" else ("✕" if event.get("event")=="stage_error" else "●")
+                event_box.markdown(f'<div class="detail"><b>{prefix} {event.get("stage","Stage")}</b> · {event.get("source","")}<br><span class="small">{event.get("message","")}</span></div>',unsafe_allow_html=True)
+            run_pipeline(str(mp),str(OUTPUT),bool(force),on_event=on_event)
+            st.session_state.last_result=json.loads((OUTPUT/"audit"/"latest.json").read_text(encoding="utf-8"))
+            st.rerun()
+        except Exception as exc:
+            event_box.error(f"{type(exc).__name__}: {exc}")
+            st.exception(exc)
 if st.session_state.last_result:
     p=st.session_state.last_result; st.markdown("## 3 · Run result"); st.caption(f"Run ID: {p['run']['run_id']} · Duration: {p['run']['duration_seconds']}s")
     for row in p["results"]:
