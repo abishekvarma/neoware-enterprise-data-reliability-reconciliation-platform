@@ -1,14 +1,13 @@
 from pathlib import Path
-from src.reliability_pipeline import _hash_file
+from src.reliability_pipeline import reliability_score, sha256_path
 
-def test_hash_is_stable(tmp_path: Path):
-    path = tmp_path / "data.csv"
-    path.write_text("id,name\n1,A\n", encoding="utf-8")
-    first = _hash_file(path)
-    second = _hash_file(path)
-    assert first == second
-    assert len(first) == 64
+def test_score_formula():
+    assert reliability_score({"completeness":98,"validity":97,"uniqueness":99,"referential_integrity":96,"freshness":100})==97.55
 
-def test_manifest_shape():
-    manifest = {"sources":[{"name":"x","type":"File upload","materialized_path":"x.csv"}]}
-    assert manifest["sources"][0]["name"] == "x"
+def test_hash_stable(tmp_path:Path):
+    p=tmp_path/"x.csv"; p.write_text("id,name\n1,A\n",encoding="utf-8")
+    assert sha256_path(p)==sha256_path(p)
+
+def test_hash_changes(tmp_path:Path):
+    p=tmp_path/"x.csv"; p.write_text("a",encoding="utf-8"); first=sha256_path(p); p.write_text("b",encoding="utf-8")
+    assert first!=sha256_path(p)

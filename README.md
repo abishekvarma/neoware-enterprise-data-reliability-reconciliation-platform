@@ -1,50 +1,70 @@
 # Enterprise Data Reliability & Readiness Platform
 
-A source-agnostic Data Engineering framework for turning heterogeneous enterprise data into trusted, analytics-ready datasets.
+Production-style Data Engineering reference implementation — no AI/ML dependency.
 
-## Core design
+## Purpose
 
-**The source is not the pipeline.**
+A reusable reliability control plane for heterogeneous enterprise data. The source can change without changing the common processing engine.
 
-A customer may provide data as CSV, JSON, JSONL, Parquet, HTTP/REST, Amazon S3, Azure Blob/ADLS, a SQL query, or a local path during development.
+## Source → trusted data flow
 
-Only the ingestion adapter changes. The downstream reliability engine remains common.
+SOURCE → ADAPTER → RAW BRONZE → PARSED BRONZE → PROFILE → QUALITY GATE → QUARANTINE → SILVER → RELIABILITY SCORE → GOLD → AUDIT
 
-## Processing flow
+Supported sources:
+- File upload: CSV, JSON, JSONL, Parquet
+- HTTP/REST GET
+- Amazon S3 object
+- Azure Blob / ADLS object or SAS URL
+- SQL database query
+- Local path for development
 
-SOURCE → ADAPTER → BRONZE → PROFILE → QUALITY GATE → QUARANTINE → SILVER → RELIABILITY SCORE → GOLD
+## Ten engineering controls
 
-Controls include raw-source preservation, profiling, required-column checks, uniqueness checks, optional referential-integrity checks, quarantine with failure reasons, standardized Silver output, Gold trusted output, batch IDs, file hashes and audit records.
+1. Preserve original source bytes in Raw Bronze.
+2. Profile row count, schema, columns and null/blank counts.
+3. Apply configurable required-field, uniqueness, range and regex rules.
+4. Quarantine failed records with failure reasons.
+5. Promote only quality-passing records to Silver.
+6. Validate configured foreign-key/reference relationships.
+7. Create Gold only when the reliability gate passes.
+8. Write auditable batch, fingerprint, row-count, metric and duration records.
+9. Calculate reliability from completeness 30%, validity 25%, uniqueness 20%, referential integrity 15%, freshness 10%.
+10. Enforce idempotency using SHA-256 fingerprints; use --force for explicit reprocessing.
 
-Reliability score weights:
-- Completeness 30%
-- Validity 25%
-- Uniqueness 20%
-- Referential integrity 15%
-- Freshness 10%
-
-## Run locally
+## Run
 
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 
 CLI:
 python -m src.run_pipeline --manifest data/run_manifest.json --output output
+python -m src.run_pipeline --manifest data/run_manifest.json --output output --force
 
-## Credentials
+## Reliability formula
 
-Cloud/database credentials are not stored in the repository. Use environment variables or Streamlit secrets. Never commit .streamlit/secrets.toml, .env, access keys, passwords or tokens.
+score = 0.30*C + 0.25*V + 0.20*U + 0.15*RI + 0.10*F
 
-## Windows + PySpark
+The UI and CLI expose the individual dimensions so a reviewer can trace the score to actual controls.
 
-Local Spark writes use Hadoop filesystem APIs. On Windows, configure the Hadoop Windows runtime (HADOOP_HOME / winutils.exe) or run the project in WSL/Linux/Databricks. The app surfaces the runtime error instead of pretending the pipeline completed.
+## Security
 
-## Production mapping
+Credentials are never committed. API tokens and database connection strings are referenced through environment variables; local Streamlit secrets can be used outside Git. Do not commit .env or .streamlit/secrets.toml.
 
-The reference implementation maps naturally to Azure Data Factory/orchestration, ADLS Gen2, Azure Databricks + PySpark, Delta Lake Bronze/Silver/Gold, catalog/lineage/access control, CI/CD, monitoring and alerting. These are architecture targets unless explicitly marked as implemented.
+## Production deployment mapping
 
-## Engineering question
+The local implementation is runnable and intentionally keeps cloud services optional. The same contracts map to Azure Data Factory/orchestration, ADLS Gen2 or S3, Azure Databricks/Spark, Delta Lake Bronze/Silver/Gold, catalog/lineage, CI/CD, monitoring, alerting and secret management. These are architecture targets until actually deployed and tested.
 
-If a completely new customer arrives with a different source type and different schema tomorrow, how much pipeline code must be rewritten?
+## What to show a reviewer
 
-The intended answer: the source adapter and configuration may change; common reliability behavior does not.
+1. Start the UI.
+2. Register a source.
+3. Configure its data contract.
+4. Execute the pipeline.
+5. Show Raw Bronze preservation.
+6. Show profiling.
+7. Show quarantined rows and failure reasons.
+8. Show Silver/Gold outputs.
+9. Show reliability dimensions and score.
+10. Re-run the same source and demonstrate idempotent skip; then use Force reprocess for recovery.
+
+The differentiator is reusable engineering behavior: a new source type or schema should require an adapter/configuration change, not a rewritten reliability pipeline.

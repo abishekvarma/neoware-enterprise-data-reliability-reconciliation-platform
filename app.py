@@ -1,94 +1,64 @@
 from __future__ import annotations
-import json
-import subprocess
-import sys
+import json,subprocess,sys,uuid
 from pathlib import Path
 import streamlit as st
 from src.source_adapters import materialize_source
-
-BASE=Path(__file__).resolve().parent
-INCOMING=BASE/"data"/"incoming"
-OUTPUT=BASE/"output"
-st.set_page_config(page_title="Data Reliability & Readiness", page_icon="◆", layout="wide")
+BASE=Path(__file__).resolve().parent; INCOMING=BASE/"data"/"incoming"; OUTPUT=BASE/"output"
+st.set_page_config(page_title="Enterprise Data Reliability",page_icon="◆",layout="wide")
 st.markdown("""<style>
-.block-container{max-width:1250px;padding:2rem 2.2rem 4rem}
-.hero{padding:34px 38px;border:1px solid #dbe4ec;border-radius:22px;background:linear-gradient(135deg,#0b1f33,#123d55);color:white}
-.hero h1{font-size:2.7rem;margin:.2rem 0 .6rem}.hero p{max-width:950px;font-size:1.05rem;line-height:1.65;opacity:.9}
-.pill{display:inline-block;border:1px solid rgba(255,255,255,.25);padding:5px 10px;border-radius:99px;margin:4px 5px 0 0;font-size:.78rem}
-.source-card{border:1px solid #dce5eb;border-radius:16px;padding:18px;background:#fff;margin-bottom:12px}
+.block-container{max-width:1280px;padding:2rem 2.5rem 4rem}.hero{padding:34px 40px;border-radius:22px;background:linear-gradient(135deg,#0b1f33,#164b63);color:#fff;margin-bottom:22px}.hero h1{font-size:2.55rem;margin:.3rem 0 .5rem}.hero p{font-size:1.05rem;max-width:1000px;line-height:1.6;color:#d8e6ee}.card{border:1px solid #dce5eb;border-radius:16px;padding:18px 20px;background:#fff;margin:8px 0}.small{color:#607080;font-size:.9rem}
 </style>""",unsafe_allow_html=True)
-if "sources" not in st.session_state: st.session_state.sources=[]
-st.markdown("""<div class="hero"><div style="color:#9fb5c5">SOURCE-AGNOSTIC DATA ENGINEERING</div>
-<h1>Enterprise Data Reliability & Readiness Platform</h1>
-<p>Bring data from the source that actually exists — files, APIs, cloud object storage, databases or a local path. The ingestion adapter changes; the reliability engine does not.</p>
-<span class="pill">CSV</span><span class="pill">JSON / JSONL</span><span class="pill">Parquet</span><span class="pill">HTTP / API</span><span class="pill">S3</span><span class="pill">Azure Blob / ADLS</span><span class="pill">SQL databases</span><span class="pill">PySpark</span></div>""",unsafe_allow_html=True)
-st.markdown("### 1. Add data sources")
-st.caption("There is no fixed customer/order/payment/product form. Each source is registered by name and connection type.")
-with st.form("source_form",clear_on_submit=True):
-    c1,c2=st.columns(2)
-    name=c1.text_input("Source name",placeholder="customer_master")
-    source_type=c2.selectbox("How will the data arrive?",["File upload","API / HTTP","Amazon S3","Azure Blob / ADLS","Database","Local path"])
-    uploaded=None
-    spec={"name":name.strip(),"type":source_type}
-    if source_type=="File upload":
-        uploaded=st.file_uploader("Data file",type=["csv","json","jsonl","parquet"],help="CSV is optional; JSON and Parquet are supported too.")
-    elif source_type=="API / HTTP":
-        spec["url"]=st.text_input("API / HTTP URL",placeholder="https://example.com/api/data")
-    elif source_type=="Amazon S3":
-        spec["uri"]=st.text_input("S3 object URI",placeholder="s3://bucket/path/data.parquet")
-    elif source_type=="Azure Blob / ADLS":
-        spec["uri"]=st.text_input("Azure URI",placeholder="az://container/path/data.parquet or HTTPS/SAS URL")
-    elif source_type=="Database":
-        spec["connection_url"]=st.text_input("Database connection URL",type="password",help="Use secrets/env vars in real deployments; never commit credentials.")
-        spec["query"]=st.text_area("Read-only SQL query",placeholder="SELECT * FROM schema.table")
-    else:
-        spec["path"]=st.text_input("Local data path",placeholder="C:/data/customer_master.parquet")
-    c1,c2,c3=st.columns(3)
-    spec["required_columns"]=[x.strip() for x in c1.text_input("Required columns (optional)",placeholder="id,name,updated_at").split(",") if x.strip()]
-    spec["unique_key"]=c2.text_input("Unique key (optional)",placeholder="id").strip() or None
-    spec["pass_threshold"]=c3.number_input("Reliability pass threshold",0.0,100.0,95.0,0.5)
-    add=st.form_submit_button("＋ Add source",type="primary")
+if "sources" not in st.session_state:st.session_state.sources=[]
+if "last_result" not in st.session_state:st.session_state.last_result=None
+st.markdown("""<div class="hero"><div style="font-size:.8rem;letter-spacing:.15em;color:#a9c3d0">DATA ENGINEERING • PRODUCTION-STYLE REFERENCE IMPLEMENTATION</div><h1>Enterprise Data Reliability & Readiness Platform</h1><p>Connect a source. Preserve the raw batch. Profile it. Enforce configurable quality controls. Quarantine failures. Produce trusted Silver/Gold data. Record an auditable reliability score. The reliability engine is independent of the source type.</p></div>""",unsafe_allow_html=True)
+a,b,c,d=st.columns(4); a.metric("Source adapters","6"); b.metric("Formats","4"); c.metric("Quality dimensions","5"); d.metric("Pipeline controls","10")
+st.divider(); st.markdown("## 1 · Register a source"); st.caption("No customer/order/product schema is hard-coded. Each source defines its own contract.")
+with st.form("source"):
+    c1,c2=st.columns(2); name=c1.text_input("Source name",placeholder="erp_orders"); kind=c2.selectbox("Source type",["File upload","API / HTTP","Amazon S3","Azure Blob / ADLS","Database","Local path"])
+    uploaded=None; spec={"name":name.strip(),"type":kind}
+    if kind=="File upload":uploaded=st.file_uploader("Upload data",type=["csv","json","jsonl","parquet"],max_upload_size=2048)
+    elif kind=="API / HTTP":
+        spec["url"]=st.text_input("GET endpoint",placeholder="https://api.example.com/v1/orders"); spec["auth_env"]=st.text_input("Auth token environment variable",placeholder="API_TOKEN"); spec["auth_header"]=st.text_input("Auth header",value="Authorization")
+    elif kind=="Amazon S3":spec["uri"]=st.text_input("S3 object",placeholder="s3://bucket/path/data.parquet")
+    elif kind=="Azure Blob / ADLS":spec["uri"]=st.text_input("Azure Blob URI or SAS URL",placeholder="az://container/path/data.parquet")
+    elif kind=="Database":spec["connection_env"]=st.text_input("Connection-string environment variable",placeholder="ERP_DB_URL"); spec["query"]=st.text_area("Read-only SQL",placeholder="SELECT * FROM schema.table")
+    else:spec["path"]=st.text_input("Local path",placeholder="C:/data/source.parquet")
+    c1,c2,c3=st.columns(3); req=c1.text_input("Required columns",placeholder="id,name,updated_at"); spec["required_columns"]=[x.strip() for x in req.split(",") if x.strip()]; spec["unique_key"]=c2.text_input("Unique key",placeholder="id").strip() or None; spec["freshness_column"]=c3.text_input("Freshness column",placeholder="updated_at").strip() or None
+    c1,c2,c3=st.columns(3); spec["freshness_sla_hours"]=c1.number_input("Freshness SLA (hours)",0.0,8760.0,24.0,1.0); spec["pass_threshold"]=c2.number_input("Reliability threshold",0.0,100.0,95.0,.5); spec["reject_unexpected_columns"]=c3.checkbox("Reject unexpected columns",value=False)
+    with st.expander("Advanced quality rules"):
+        spec["expected_schema"]=json.loads(st.text_area("Expected schema JSON",value="{}")); spec["numeric_rules"]=json.loads(st.text_area("Numeric rules JSON",value="[]")); spec["regex_rules"]=json.loads(st.text_area("Regex rules JSON",value="[]"))
+        rs=st.text_input("Reference source name"); rc=st.text_input("Foreign-key column"); rk=st.text_input("Reference key column")
+        if rs and rc and rk:spec["reference"]={"source":rs,"column":rc,"reference_column":rk}
+    add=st.form_submit_button("Add source to run plan",type="primary")
 if add:
-    if not name.strip(): st.error("Give the source a name.")
-    else:
-        st.session_state.sources.append((spec,uploaded))
-        st.success(f"Registered source: {name.strip()}")
+    if not spec["name"]:st.error("Source name is required.")
+    else:st.session_state.sources.append((spec,uploaded)); st.success(f"Added {spec['name']}.")
 if st.session_state.sources:
-    st.markdown("### Registered sources")
-    for i,(spec,uploaded) in enumerate(st.session_state.sources):
-        st.markdown(f'<div class="source-card"><b>{i+1}. {spec["name"]} · {spec["type"]}</b><br><span>Required: {", ".join(spec.get("required_columns",[])) or "none"} · Unique key: {spec.get("unique_key") or "none"}</span></div>',unsafe_allow_html=True)
-    if st.button("Clear source list"):
-        st.session_state.sources=[]; st.rerun()
-    st.markdown("### 2. Run the common reliability engine")
-    st.write("Adapter materializes the source. The same engine then profiles → validates → quarantines → standardizes → scores → promotes trusted output.")
-    if st.button("Run Data Reliability Pipeline",type="primary"):
+    st.markdown("## 2 · Run plan")
+    for i,(s,_) in enumerate(st.session_state.sources,1):st.markdown(f'<div class="card"><b>{i}. {s["name"]}</b> · {s["type"]}<br><span class="small">Required: {", ".join(s["required_columns"]) or "none"} · Key: {s["unique_key"] or "none"} · SLA: {s["freshness_sla_hours"]}h</span></div>',unsafe_allow_html=True)
+    c1,c2=st.columns([1,5]); force=c1.checkbox("Force reprocess")
+    if c1.button("Clear plan"):st.session_state.sources=[]; st.rerun()
+    if c2.button("▶ Execute full reliability pipeline",type="primary"):
         try:
             INCOMING.mkdir(parents=True,exist_ok=True)
-            for item in INCOMING.iterdir():
-                if item.is_file(): item.unlink()
-            runtime_specs=[]
-            for spec,uploaded in st.session_state.sources:
-                materialized=materialize_source(spec,uploaded,INCOMING)
-                item=dict(spec); item["materialized_path"]=str(materialized)
-                runtime_specs.append(item)
-            manifest={"sources":runtime_specs,"pass_threshold":min(x.get("pass_threshold",95) for x in runtime_specs)}
-            manifest_path=BASE/"data"/"run_manifest.json"
-            manifest_path.parent.mkdir(parents=True,exist_ok=True)
-            manifest_path.write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-            with st.status("Running PySpark reliability engine...",expanded=True) as status:
-                result=subprocess.run([sys.executable,"-m","src.run_pipeline","--manifest",str(manifest_path),"--output",str(OUTPUT)],cwd=str(BASE),capture_output=True,text=True)
-                if result.returncode!=0:
-                    status.update(label="Pipeline failed",state="error"); st.code(result.stdout+"\n"+result.stderr)
-                else:
-                    status.update(label="Pipeline completed",state="complete"); st.code(result.stdout)
-            if result.returncode==0 and (OUTPUT/"audit"/"run.json").exists():
-                audit=json.loads((OUTPUT/"audit"/"run.json").read_text())
-                st.markdown("### 3. Reliability results")
-                for row in audit:
-                    a,b,c,d,e=st.columns(5)
-                    a.metric("Source",row["source"]); b.metric("Rows",row["rows_received"]); c.metric("Quarantined",row["rows_quarantined"]); d.metric("Reliability",f'{row["reliability_score_pct"]}%'); e.metric("Status",row["status"])
-                st.success("The same reliability controls were applied regardless of where each source came from.")
-        except Exception as exc:
-            st.error(str(exc)); st.exception(exc)
-else:
-    st.info("Register one or more sources. A source can be a file, API, cloud object, database query or local path.")
+            for p in INCOMING.iterdir():
+                if p.is_file():p.unlink()
+            runtime=[]
+            for s,up in st.session_state.sources:
+                materialized=materialize_source(s,up,INCOMING); item=dict(s); item["materialized_path"]=str(materialized); item["format"]=Path(materialized).suffix.lstrip("."); runtime.append(item)
+            run_id=uuid.uuid4().hex[:16]; manifest={"run_id":run_id,"sources":runtime,"pass_threshold":min(x.get("pass_threshold",95) for x in runtime),"shuffle_partitions":8}
+            mp=BASE/"data"/"run_manifest.json"; mp.write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+            with st.status("Executing Bronze → Profile → Quality → Quarantine → Silver → Gold → Audit",expanded=True) as status:
+                result=subprocess.run([sys.executable,"-m","src.run_pipeline","--manifest",str(mp),"--output",str(OUTPUT)]+(["--force"] if force else []),cwd=BASE,capture_output=True,text=True)
+                if result.returncode:status.update(label="Pipeline failed",state="error"); st.code(result.stdout+"\n"+result.stderr)
+                else:status.update(label="Pipeline completed",state="complete")
+            if result.returncode==0:st.session_state.last_result=json.loads((OUTPUT/"audit"/"latest.json").read_text())
+        except Exception as exc:st.error(str(exc)); st.exception(exc)
+if st.session_state.last_result:
+    p=st.session_state.last_result; st.markdown("## 3 · Run result"); st.caption(f"Run ID: {p['run']['run_id']} · Duration: {p['run']['duration_seconds']}s")
+    for row in p["results"]:
+        if row.get("status")=="SKIPPED_IDEMPOTENT":st.info(f"{row['source']}: skipped safely because the same fingerprint was already processed."); continue
+        m1,m2,m3,m4,m5=st.columns(5); m1.metric("Rows received",row["rows_received"]); m2.metric("Quarantined",row["rows_quarantined"]); m3.metric("Completeness",f"{row['metrics']['completeness']}%"); m4.metric("Reliability",f"{row['reliability_score_pct']}%"); m5.metric("Status",row["status"]); st.progress(min(max(row["reliability_score_pct"]/100,0),1))
+        with st.expander(f"{row['source']} · quality and audit details"):st.json({"metrics":row["metrics"],"schema_errors":row["schema_errors"],"quality_rules":row["quality_rules"],"batch_id":row["batch_id"],"fingerprint":row["fingerprint"]})
+    st.success("Artifacts: output/runs/<run_id>/{bronze_raw,bronze,profiling,quarantine,silver,gold} plus audit history.")
+else:st.info("Add one or more sources to create a run plan. Nothing executes until you click the pipeline button.")

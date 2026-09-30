@@ -1,130 +1,157 @@
-"""Generic PySpark reliability engine."""
+"""Production-style, source-agnostic PySpark reliability engine."""
 from __future__ import annotations
-import hashlib
-import json
-import shutil
+import hashlib, json, logging, shutil, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from pyspark.sql import SparkSession, functions as F
+from typing import Any
+from pyspark.sql import DataFrame, SparkSession, functions as F, Window
 
-def _now():
-    return datetime.now(timezone.utc).isoformat()
+LOG=logging.getLogger("reliability")
+WEIGHTS={"completeness":.30,"validity":.25,"uniqueness":.20,"referential_integrity":.15,"freshness":.10}
 
-def _hash_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+def utc_now()->str: return datetime.now(timezone.utc).isoformat()
+
+def sha256_path(path:Path)->str:
+    digest=hashlib.sha256()
+    if path.is_file():
+        with path.open("rb") as fh:
+            for chunk in iter(lambda:fh.read(1024*1024),b""): digest.update(chunk)
+    else:
+        for item in sorted(p for p in path.rglob("*") if p.is_file()):
+            digest.update(str(item.relative_to(path)).encode())
+            with item.open("rb") as fh:
+                for chunk in iter(lambda:fh.read(1024*1024),b""): digest.update(chunk)
     return digest.hexdigest()
 
-def _read(spark, path: str):
-    suffix = Path(path).suffix.lower()
-    if suffix == ".csv":
-        return spark.read.option("header", True).option("inferSchema", True).option("mode", "PERMISSIVE").csv(path)
-    if suffix in {".json", ".jsonl"}:
-        return spark.read.option("mode", "PERMISSIVE").json(path)
-    if suffix == ".parquet":
-        return spark.read.parquet(path)
-    raise ValueError(f"Unsupported dataset format: {suffix}")
+def read_source(spark:SparkSession,path:str,fmt:str|None=None)->DataFrame:
+    p=Path(path); fmt=(fmt or p.suffix.lstrip(".")).lower()
+    if fmt=="csv": return spark.read.option("header",True).option("inferSchema",True).option("mode","PERMISSIVE").csv(path)
+    if fmt in {"json","jsonl"}: return spark.read.option("mode","PERMISSIVE").json(path)
+    if fmt=="parquet": return spark.read.parquet(path)
+    raise ValueError(f"Unsupported dataset format: {fmt}")
 
-def _profile(df):
-    total = df.count()
-    nulls = {}
-    for col in df.columns:
-        nulls[col] = df.filter(F.col(col).isNull() | (F.trim(F.col(col).cast("string")) == "")).count()
-    return {"rows": total, "columns": len(df.columns), "nulls": nulls, "schema": df.schema.simpleString()}
+def profile(df:DataFrame)->dict[str,Any]:
+    total=df.count()
+    if not df.columns: return {"rows":total,"columns":0,"nulls":{},"schema":""}
+    expr=[F.sum(F.when(F.col(c).isNull()|(F.trim(F.col(c).cast("string"))==""),1).otherwise(0)).alias(c) for c in df.columns]
+    row=df.agg(*expr).first().asDict()
+    return {"rows":total,"columns":len(df.columns),"nulls":{k:int(v or 0) for k,v in row.items()},"schema":df.schema.json(),"column_names":df.columns}
 
-def _quality(df, spec, references):
-    total = df.count()
-    required = [c for c in spec.get("required_columns", []) if c in df.columns]
-    conditions, reasons = [], []
-    for col in required:
-        bad = F.col(col).isNull() | (F.trim(F.col(col).cast("string")) == "")
-        conditions.append(~bad)
-        reasons.append(F.when(bad, F.lit(f"required:{col}")))
-    unique_key = spec.get("unique_key")
-    if unique_key and unique_key in df.columns:
-        dup_keys = df.groupBy(unique_key).count().filter(F.col("count") > 1).select(unique_key)
-        df = df.join(dup_keys.withColumn("_dup_key", F.lit(True)), unique_key, "left")
-        dup = F.col("_dup_key").isNull()
-        conditions.append(dup)
-        reasons.append(F.when(~dup, F.lit(f"duplicate:{unique_key}")))
-    ref = spec.get("reference")
-    if ref:
-        ref_df = references.get(ref.get("source"))
-        if ref_df is not None and ref.get("column") in df.columns and ref.get("reference_column") in ref_df.columns:
-            ref_values = ref_df.select(F.col(ref["reference_column"]).alias("_ref_value")).dropDuplicates()
-            df = df.join(ref_values, F.col(ref["column"]) == F.col("_ref_value"), "left")
-            ri = F.col("_ref_value").isNotNull()
-            conditions.append(ri)
-            reasons.append(F.when(~ri, F.lit(f"referential_integrity:{ref['column']}")))
-    valid = F.lit(True)
-    for condition in conditions:
-        valid = valid & condition
-    reason_expr = F.concat_ws("; ", *reasons) if reasons else F.lit("")
-    return df.withColumn("_quality_failed", ~valid).withColumn("_failure_reason", reason_expr)
+def schema_check(df:DataFrame,spec:dict)->list[str]:
+    expected=spec.get("expected_schema",{})
+    if not expected: return []
+    actual={f.name:f.dataType.simpleString() for f in df.schema.fields}; errors=[]
+    for name,dtype in expected.items():
+        if name not in actual: errors.append(f"missing_column:{name}")
+        elif dtype and actual[name]!=dtype: errors.append(f"type_mismatch:{name}:{actual[name]}!={dtype}")
+    if spec.get("reject_unexpected_columns"):
+        errors += [f"unexpected_column:{n}" for n in actual if n not in expected]
+    return errors
 
-def run(manifest_path="data/run_manifest.json", output_root="output"):
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    root = Path(output_root)
-    if root.exists():
-        shutil.rmtree(root)
-    for name in ["bronze", "profiling", "quarantine", "silver", "gold", "audit"]:
-        (root / name).mkdir(parents=True, exist_ok=True)
-    spark = (SparkSession.builder.appName("EnterpriseDataReliabilityReadiness")
-             .master("local[*]").config("spark.sql.shuffle.partitions", "8").getOrCreate())
-    spark.sparkContext.setLogLevel("WARN")
-    loaded, prepared = {}, []
-    for spec in manifest["sources"]:
-        path = Path(spec["materialized_path"])
-        df = _read(spark, str(path))
-        batch_id = _hash_file(path)[:16]
-        df = (df.withColumn("_source", F.lit(spec["name"]))
-                .withColumn("_batch_id", F.lit(batch_id))
-                .withColumn("_ingested_at", F.current_timestamp()))
-        loaded[spec["name"]] = df
-        prepared.append((spec, df, batch_id))
-    audit = []
-    for spec, df, batch_id in prepared:
-        total = df.count()
-        df.write.mode("overwrite").parquet(str(root / "bronze" / spec["name"] / batch_id))
-        profile = _profile(df)
-        (root / "profiling" / f"{spec['name']}_{batch_id}.json").write_text(json.dumps(profile, indent=2), encoding="utf-8")
-        checked = _quality(df, spec, loaded)
-        failed, valid = checked.filter(F.col("_quality_failed")), checked.filter(~F.col("_quality_failed"))
-        failed_count, valid_count = failed.count(), valid.count()
-        failed.write.mode("overwrite").parquet(str(root / "quarantine" / spec["name"] / batch_id))
-        valid.write.mode("overwrite").parquet(str(root / "silver" / spec["name"] / batch_id))
-        required = [c for c in spec.get("required_columns", []) if c in df.columns]
-        if required:
-            complete = F.lit(True)
-            for c in required:
-                complete = complete & F.col(c).isNotNull() & (F.trim(F.col(c).cast("string")) != "")
-            completeness = valid.filter(complete).count() / total * 100 if total else 100.0
+def apply_quality(df:DataFrame,spec:dict,references:dict[str,DataFrame])->tuple[DataFrame,dict]:
+    checks=[]
+    for c in spec.get("required_columns",[]):
+        if c in df.columns:
+            bad=F.col(c).isNull()|(F.trim(F.col(c).cast("string"))==""); checks.append((f"required:{c}",~bad))
+        else: checks.append((f"missing_column:{c}",F.lit(False)))
+    key=spec.get("unique_key")
+    if key:
+        if key not in df.columns: checks.append((f"missing_unique_key:{key}",F.lit(False)))
         else:
-            completeness = 100.0
-        validity = valid_count / total * 100 if total else 100.0
-        uniqueness = (valid.select(unique_key).dropDuplicates().count() / valid_count * 100
-                      if (unique_key := spec.get("unique_key")) and valid_count else 100.0)
-        ri = 100.0
-        if spec.get("reference"):
-            ref = spec["reference"]
-            ref_df = loaded.get(ref["source"])
-            if ref_df is not None:
-                refs = ref_df.select(F.col(ref["reference_column"]).alias("_ref")).dropDuplicates()
-                ri_count = valid.join(refs, valid[ref["column"]] == F.col("_ref"), "left_semi").count()
-                ri = ri_count / total * 100 if total else 100.0
-        score = round(completeness*.30 + validity*.25 + uniqueness*.20 + ri*.15 + 100*.10, 2)
-        valid.withColumn("_gold_created_at", F.current_timestamp()).write.mode("overwrite").parquet(str(root/"gold"/spec["name"]/batch_id))
-        audit.append({
-            "source":spec["name"],"batch_id":batch_id,"rows_received":total,"rows_valid":valid_count,
-            "rows_quarantined":failed_count,"completeness_pct":round(completeness,2),
-            "validity_pct":round(validity,2),"uniqueness_pct":round(uniqueness,2),
-            "referential_integrity_pct":round(ri,2),"freshness_pct":100.0,
-            "reliability_score_pct":score,
-            "status":"PASS" if score >= manifest.get("pass_threshold",95) else "REVIEW",
-            "processed_at":_now()
-        })
-    (root/"audit"/"run.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
-    spark.stop()
-    return audit
+            df=df.withColumn("_dup_count",F.count("*").over(Window.partitionBy(key)))
+            checks.append((f"unique:{key}",F.col("_dup_count")==1))
+    for rule in spec.get("numeric_rules",[]):
+        c=rule.get("column")
+        if c in df.columns:
+            value=F.col(c).cast("double"); ok=F.lit(True)
+            if rule.get("min") is not None: ok=ok&(value>=float(rule["min"]))
+            if rule.get("max") is not None: ok=ok&(value<=float(rule["max"]))
+            checks.append((f"range:{c}",ok))
+    for rule in spec.get("regex_rules",[]):
+        c=rule.get("column")
+        if c in df.columns: checks.append((f"regex:{c}",F.col(c).cast("string").rlike(rule["pattern"])))
+    ref=spec.get("reference")
+    if ref:
+        ref_df=references.get(ref.get("source"))
+        if ref_df is not None and ref.get("column") in df.columns and ref.get("reference_column") in ref_df.columns:
+            vals=ref_df.select(F.col(ref["reference_column"]).alias("_ref_value")).dropDuplicates()
+            df=df.join(vals,F.col(ref["column"])==F.col("_ref_value"),"left")
+            checks.append((f"referential_integrity:{ref['column']}",F.col("_ref_value").isNotNull()))
+    passed=F.lit(True); reasons=[]
+    for name,condition in checks:
+        passed=passed&condition; reasons.append(F.when(~condition,F.lit(name)))
+    reason=F.concat_ws("; ",*reasons) if reasons else F.lit("")
+    return df.withColumn("_quality_failed",~passed).withColumn("_failure_reason",reason),{"rule_count":len(checks),"rules":[x[0] for x in checks]}
+
+def freshness_pct(df:DataFrame,column:str|None,sla_hours:float|None)->float:
+    if not column or column not in df.columns or not sla_hours: return 100.0
+    latest=df.select(F.max(F.to_timestamp(F.col(column))).alias("latest")).first()["latest"]
+    if latest is None: return 0.0
+    age=(datetime.now(timezone.utc).replace(tzinfo=None)-latest).total_seconds()/3600
+    return 100.0 if age<=float(sla_hours) else 0.0
+
+def reliability_score(metrics:dict[str,float])->float:
+    return round(sum(metrics[k]*WEIGHTS[k] for k in WEIGHTS),2)
+
+def _append_jsonl(path:Path,row:dict):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open("a",encoding="utf-8") as fh: fh.write(json.dumps(row,default=str)+"\n")
+
+def _read_history(path:Path)->set[str]:
+    if not path.exists(): return set()
+    return {json.loads(x)["fingerprint"] for x in path.read_text(encoding="utf-8").splitlines() if x.strip() and "fingerprint" in json.loads(x)}
+
+def run(manifest_path="data/run_manifest.json",output_root="output",force=False)->dict:
+    manifest=json.loads(Path(manifest_path).read_text(encoding="utf-8")); run_id=manifest.get("run_id") or uuid.uuid4().hex[:16]
+    started=time.time(); root=Path(output_root); root.mkdir(parents=True,exist_ok=True)
+    history=root/"audit"/"history.jsonl"; seen=_read_history(history)
+    spark=(SparkSession.builder.appName("EnterpriseDataReliabilityReadiness").master(manifest.get("spark_master","local[*]")).config("spark.sql.shuffle.partitions",str(manifest.get("shuffle_partitions",8))).config("spark.sql.adaptive.enabled","true").getOrCreate())
+    spark.sparkContext.setLogLevel("WARN"); results=[]; references={}; prepared=[]
+    try:
+        for spec in manifest["sources"]:
+            path=Path(spec["materialized_path"])
+            if not path.exists(): raise FileNotFoundError(f"Source does not exist: {path}")
+            fingerprint=sha256_path(path)
+            if fingerprint in seen and not force:
+                results.append({"source":spec["name"],"status":"SKIPPED_IDEMPOTENT","fingerprint":fingerprint}); continue
+            df=read_source(spark,str(path),spec.get("format"))
+            batch=fingerprint[:16]
+            df=df.withColumn("_source",F.lit(spec["name"])).withColumn("_batch_id",F.lit(batch)).withColumn("_ingested_at",F.current_timestamp())
+            prepared.append((spec,path,fingerprint,batch,df)); references[spec["name"]]=df
+        if not prepared and results: return {"run_id":run_id,"status":"NOOP","results":results,"duration_seconds":round(time.time()-started,2)}
+        for spec,path,fingerprint,batch,df in prepared:
+            base=root/"runs"/run_id
+            for layer in ("bronze_raw","bronze","profiling","quarantine","silver","gold"): (base/layer/spec["name"]/batch).mkdir(parents=True,exist_ok=True)
+            if path.is_file(): shutil.copy2(path,base/"bronze_raw"/spec["name"]/batch/path.name)
+            total=df.count(); df.write.mode("overwrite").parquet(str(base/"bronze"/spec["name"]/batch))
+            prof=profile(df); (base/"profiling"/spec["name"]/batch/"profile.json").write_text(json.dumps(prof,indent=2,default=str),encoding="utf-8")
+            schema_errors=schema_check(df,spec); checked,rule_meta=apply_quality(df,spec,references)
+            failed=checked.filter(F.col("_quality_failed")); valid=checked.filter(~F.col("_quality_failed"))
+            failed_count,valid_count=failed.count(),valid.count()
+            failed.write.mode("overwrite").parquet(str(base/"quarantine"/spec["name"]/batch)); valid.write.mode("overwrite").parquet(str(base/"silver"/spec["name"]/batch))
+            required=[c for c in spec.get("required_columns",[]) if c in df.columns]
+            if required:
+                complete=F.lit(True)
+                for c in required: complete=complete&F.col(c).isNotNull()&(F.trim(F.col(c).cast("string"))!="")
+                completeness=valid.filter(complete).count()/total*100 if total else 100.0
+            else: completeness=100.0
+            validity=valid_count/total*100 if total else 100.0
+            key=spec.get("unique_key")
+            uniqueness=valid.select(key).dropDuplicates().count()/valid_count*100 if key and key in valid.columns and valid_count else 100.0
+            ri=100.0; ref=spec.get("reference")
+            if ref and ref.get("source") in references and ref.get("column") in valid.columns:
+                ref_df=references[ref["source"]]
+                if ref.get("reference_column") in ref_df.columns:
+                    vals=ref_df.select(F.col(ref["reference_column"]).alias("_ref")).dropDuplicates()
+                    ri=valid.join(vals,valid[ref["column"]]==F.col("_ref"),"left_semi").count()/total*100 if total else 100.0
+            fresh=freshness_pct(df,spec.get("freshness_column"),spec.get("freshness_sla_hours"))
+            metrics={"completeness":round(completeness,2),"validity":round(validity,2),"uniqueness":round(uniqueness,2),"referential_integrity":round(ri,2),"freshness":round(fresh,2)}
+            score=reliability_score(metrics); threshold=float(spec.get("pass_threshold",manifest.get("pass_threshold",95)))
+            status="SCHEMA_REVIEW" if schema_errors else ("PASS" if score>=threshold else "REVIEW")
+            if status=="PASS": valid.withColumn("_gold_created_at",F.current_timestamp()).write.mode("overwrite").parquet(str(base/"gold"/spec["name"]/batch))
+            audit={"run_id":run_id,"source":spec["name"],"source_type":spec["type"],"batch_id":batch,"fingerprint":fingerprint,"rows_received":total,"rows_valid":valid_count,"rows_quarantined":failed_count,"metrics":metrics,"reliability_score_pct":score,"threshold_pct":threshold,"status":status,"schema_errors":schema_errors,"quality_rules":rule_meta,"processed_at":utc_now(),"duration_seconds":round(time.time()-started,2)}
+            _append_jsonl(history,audit); results.append(audit)
+        summary={"run_id":run_id,"status":"COMPLETED","sources_processed":len(prepared),"finished_at":utc_now(),"duration_seconds":round(time.time()-started,2)}
+        (root/"audit"/"latest.json").write_text(json.dumps({"run":summary,"results":results},indent=2,default=str),encoding="utf-8")
+        return {"run_id":run_id,"status":"COMPLETED","results":results,"duration_seconds":summary["duration_seconds"]}
+    finally: spark.stop()
