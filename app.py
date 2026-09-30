@@ -90,7 +90,9 @@ def node_html(state=None,row=None,stage_durations=None):
                 cls="warn" if row.get("rows_quarantined",0)>0 else "done"; label=f"{row.get('quality_rules',{}).get('rule_count',0)} rules"
             elif title=="Quarantine":
                 cls="warn" if row.get("rows_quarantined",0)>0 else "done"; label=f"{row.get('rows_quarantined',0):,} rejected"
-            elif title=="Silver": cls="done"; label=f"{row.get('rows_valid',0):,} valid"
+            elif title=="Silver":
+                cls="error" if row.get("schema_errors") else "done"
+                label="Blocked" if cls=="error" else f"{row.get('rows_valid',0):,} valid"
             elif title=="Integrity":
                 ri=row.get("metrics",{}).get("referential_integrity",100)
                 cls="warn" if ri<100 else "done"; label=f"RI {ri}%"
