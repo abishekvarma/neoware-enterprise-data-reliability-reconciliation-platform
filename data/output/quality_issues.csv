@@ -1,3 +1,0 @@
-source,record_key,rule,severity,detail
-legacy_invoices,INV-1010,unique_invoice_order,High,order_id O1010 appears multiple times in invoice source
-legacy_invoices,INV-1010-DUP,unique_invoice_order,High,order_id O1010 appears multiple times in invoice source
