@@ -1,5 +1,0 @@
-source,records,completeness_pct,unique_keys,status
-customer_master,10,100.0,10,Healthy
-orders_api,10,100.0,10,Healthy
-legacy_invoices,11,100.0,11,Healthy
-support_system,10,100.0,10,Healthy
