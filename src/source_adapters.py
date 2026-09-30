@@ -1,6 +1,6 @@
 """Secure, source-agnostic source adapters. Credentials stay outside Git."""
 from __future__ import annotations
-import csv,os,re
+import csv,json,os,re
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
@@ -14,7 +14,10 @@ def _headers(spec:dict)->dict:
     if not env:return {}
     token=os.getenv(env)
     if not token:raise RuntimeError(f"Authentication secret {env} is not configured.")
-    return {spec.get("auth_header","Authorization"):token}
+    auth_type=spec.get("auth_type","Bearer")
+    if auth_type=="Bearer":
+        return {spec.get("auth_header","Authorization"):f"Bearer {token}"}
+    return {spec.get("auth_header","X-API-Key"):token}
 
 def save_upload(uploaded,destination:Path)->Path:
     destination.parent.mkdir(parents=True,exist_ok=True)
@@ -39,7 +42,15 @@ def excel_to_csv(source:Path,destination_dir:Path,name:str)->Path:
     return out
 
 def fetch_http(spec:dict,destination_dir:Path)->Path:
-    r=requests.get(spec["url"],headers=_headers(spec),timeout=int(spec.get("timeout_seconds",120)),stream=True)
+    method=spec.get("method","GET").upper()
+    headers=_headers(spec)
+    kwargs={"headers":headers,"timeout":int(spec.get("timeout_seconds",120)),"stream":True}
+    body=spec.get("body_json")
+    if method=="POST" and body:
+        kwargs["json"]=body
+    if method not in {"GET","POST"}:
+        raise ValueError("API adapter supports GET and POST.")
+    r=requests.request(method,spec["url"],**kwargs)
     r.raise_for_status()
     suffix=Path(urlparse(spec["url"]).path).suffix.lower()
     ctype=r.headers.get("content-type","").lower()
@@ -76,7 +87,22 @@ def fetch_azure(spec:dict,destination_dir:Path)->Path:
     with out.open("wb") as fh:fh.write(client.download_blob().readall())
     return out
 
-def fetch_database(spec:dict,destination_dir:Path)->Path:
+
+def fetch_gcs(spec:dict,destination_dir:Path)->Path:
+    try:
+        from google.cloud import storage
+    except ImportError as exc:
+        raise RuntimeError("Install google-cloud-storage for Google Cloud Storage.") from exc
+    p=urlparse(spec["uri"])
+    if p.scheme!="gs" or not p.netloc or not p.path.strip("/"):
+        raise ValueError("Use gs://bucket/object.ext")
+    client=storage.Client()
+    blob=client.bucket(p.netloc).blob(p.path.lstrip("/"))
+    out=destination_dir/f"{safe_name(spec['name'])}{Path(p.path).suffix or '.parquet'}"
+    blob.download_to_filename(str(out))
+    return out
+
+def fetch_database(spec:dict,destination_dir:Path):
     try:
         import pandas as pd
         from sqlalchemy import create_engine
@@ -104,6 +130,7 @@ def materialize_source(spec:dict,uploaded=None,work_dir:str|Path="data/incoming"
     if kind=="API / HTTP":return fetch_http(spec,work_dir)
     if kind=="Amazon S3":return fetch_s3(spec,work_dir)
     if kind=="Azure Blob / ADLS":return fetch_azure(spec,work_dir)
+    if kind=="Google Cloud Storage":return fetch_gcs(spec,work_dir)
     if kind=="Database":return fetch_database(spec,work_dir)
     if kind=="Local path":
         p=Path(spec["path"]).expanduser().resolve()
